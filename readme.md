@@ -33,3 +33,6 @@ pip install -r requirements.txt
 ## Running Experiments
 
 Each experiment has three phases: (1) pretraining data collection (2) pretraining (3) evaluation of the in-context algorithm. There is a  file `run_bandit.sh`, that show example usage to run these. Training in all settings can take several hours, so it may be prudent to start with smaller problems (e.g. fewer arms, reduced time horizon, etc.). 
+```bash
+./run_bandit.sh
+```
