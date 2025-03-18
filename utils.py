@@ -55,6 +55,8 @@ def build_bandit_model_filename(env, config):
     filename += '_H' + str(config['horizon'])
     filename += '_d' + str(config['dim'])
     filename += '_seed' + str(config['seed'])
+    filename += '_epoch' + str(config['epoch'])
+    print(filename)
     return filename
 
 def build_linear_bandit_data_filename(env, n_envs, config, mode):

@@ -7,17 +7,13 @@ import torch
 from IPython import embed
 
 import common_args
-from evals import eval_bandit, eval_linear_bandit, eval_darkroom
+from evals import eval_bandit, eval_linear_bandit
 from net import Transformer, ImageTransformer
 from utils import (
     build_bandit_data_filename,
     build_bandit_model_filename,
     build_linear_bandit_data_filename,
     build_linear_bandit_model_filename,
-    build_darkroom_data_filename,
-    build_darkroom_model_filename,
-    build_miniworld_data_filename,
-    build_miniworld_model_filename,
 )
 import numpy as np
 import scipy
@@ -86,6 +82,8 @@ if __name__ == '__main__':
         'horizon': horizon,
         'dim': dim,
         'seed': seed,
+        'epoch': epoch
+
     }
     if envname == 'bandit':
         state_dim = 1
@@ -107,13 +105,6 @@ if __name__ == '__main__':
     elif envname.startswith('darkroom'):
         state_dim = 2
         action_dim = 5
-
-        filename = build_darkroom_model_filename(envname, model_config)
-    elif envname == 'miniworld':
-        state_dim = 2
-        action_dim = 4
-
-        filename = build_miniworld_model_filename(envname, model_config)
     else:
         raise NotImplementedError
 
@@ -140,7 +131,9 @@ if __name__ == '__main__':
     if epoch < 0:
         model_path = f'models/{tmp_filename}.pt'
     else:
-        model_path = f'models/{tmp_filename}_epoch{epoch}.pt'
+        #model_path = f'models/{tmp_filename}_epoch{epoch}.pt'
+        model_path = f'models/{tmp_filename}.pt'
+
     
     
 
@@ -148,6 +141,7 @@ if __name__ == '__main__':
     
     checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint)
+    #model.load_model_weights(checkpoint)
     model.eval()
 
     dataset_config = {
@@ -164,16 +158,6 @@ if __name__ == '__main__':
         eval_filepath = build_linear_bandit_data_filename(
             envname, n_eval, dataset_config, mode=2)
         save_filename = f'{filename}_testcov{test_cov}_hor{horizon}.pkl'
-    elif envname in ['darkroom_heldout', 'darkroom_permuted']:
-        dataset_config.update({'rollin_type': 'uniform'})
-        eval_filepath = build_darkroom_data_filename(
-            envname, n_eval, dataset_config, mode=2)
-        save_filename = f'{filename}_hor{horizon}.pkl'
-    elif envname == 'miniworld':
-        dataset_config.update({'rollin_type': 'uniform'})        
-        eval_filepath = build_miniworld_data_filename(
-            envname, 0, n_eval, dataset_config, mode=2)
-        save_filename = f'{filename}_hor{horizon}.pkl'
     else:
         raise ValueError(f'Environment {envname} not supported')
 
@@ -238,59 +222,4 @@ if __name__ == '__main__':
 
         eval_linear_bandit.offline_graph(eval_trajs, model, **config)
         plt.savefig(f'figs/{evals_filename}/graph/{save_filename}_graph.png')
-        plt.clf()
-
-
-
-    elif envname in ['darkroom_heldout', 'darkroom_permuted']:
-        config = {
-            'Heps': 40,
-            'horizon': horizon,
-            'H': H,
-            'n_eval': min(20, n_eval),
-            'dim': dim,
-            'permuted': True if envname == 'darkroom_permuted' else False,
-        }
-        eval_darkroom.online(eval_trajs, model, **config)
-        plt.savefig(f'figs/{evals_filename}/online/{save_filename}.png')
-        plt.clf()
-
-        del config['Heps']
-        del config['horizon']
-        config['n_eval'] = n_eval
-        eval_darkroom.offline(eval_trajs, model, **config)
-        plt.savefig(f'figs/{evals_filename}/bar/{save_filename}_bar.png')
-        plt.clf()
-
-    elif envname == 'miniworld':
-        from evals import eval_miniworld
-        save_video = args['save_video']
-        filename_prefix = f'videos/{save_filename}/{evals_filename}/'
-        config = {
-            'Heps': 40,
-            'horizon': horizon,
-            'H': H,
-            'n_eval': min(20, n_eval),
-            'save_video': save_video,
-            'filename_template': filename_prefix + '{controller}_env{env_id}_ep{ep}_online.gif',
-        }
-
-        if save_video and not os.path.exists(f'videos/{save_filename}/{evals_filename}'):
-            os.makedirs(
-                f'videos/{save_filename}/{evals_filename}', exist_ok=True)
-
-        eval_miniworld.online(eval_trajs, model, **config)
-        plt.savefig(f'figs/{evals_filename}/online/{save_filename}.png')
-        plt.clf()
-
-        del config['Heps']
-        del config['horizon']
-        del config['H']
-        config['n_eval'] = n_eval
-        config['filename_template'] = filename_prefix + \
-            '{controller}_env{env_id}_offline.gif'
-        start_time = time.time()
-        eval_miniworld.offline(eval_trajs, model, **config)
-        print(f'Offline evaluation took {time.time() - start_time} seconds')
-        plt.savefig(f'figs/{evals_filename}/bar/{save_filename}_bar.png')
         plt.clf()

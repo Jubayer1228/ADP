@@ -14,6 +14,8 @@ from ctrls.ctrl_bandit import (
     PessMeanPolicy,
     ThompsonSamplingPolicy,
     UCBPolicy,
+    AdaptiveDopaminePolicy,
+    NonlinearDopaminePolicy,
 )
 from envs.bandit_env import BanditEnv, BanditEnvVec
 from utils import convert_to_tensor
@@ -66,7 +68,7 @@ def deploy_online_vec(vec_env, controller, horizon, include_meta=False):
     context_rewards = np.zeros((num_envs, horizon, 1))
 
     cum_means = []
-    print("Deplying online vectorized...")
+    print("Deploying online vectorized...")
     for h in range(horizon):
         batch = {
             'context_states': context_states[:, :h, :],
@@ -128,15 +130,6 @@ def online(eval_trajs, model, n_eval, horizon, var, bandit_type):
     all_means['opt'] = cum_means
 
 
-    controller = BanditTransformerController(
-        model,
-        sample=True,
-        batch_size=len(envs))
-    cum_means = deploy_online_vec(vec_env, controller, horizon).T
-    assert cum_means.shape[0] == n_eval
-    all_means['Lnr'] = cum_means
-
-
     controller = EmpMeanPolicy(
         envs[0],
         online=True,
@@ -144,6 +137,15 @@ def online(eval_trajs, model, n_eval, horizon, var, bandit_type):
     cum_means = deploy_online_vec(vec_env, controller, horizon).T
     assert cum_means.shape[0] == n_eval
     all_means['Emp'] = cum_means
+
+
+    controller = AdaptiveDopaminePolicy(
+        envs[0],
+        online=False,
+        batch_size=len(envs))
+    cum_means = deploy_online_vec(vec_env, controller, horizon).T
+    assert cum_means.shape[0] == n_eval
+    all_means['ADP'] = cum_means
 
     controller = UCBPolicy(
         envs[0],
@@ -257,7 +259,7 @@ def offline(eval_trajs, model, n_eval, horizon, var, bandit_type):
 
     opt_policy = OptPolicy(envs, batch_size=num_envs)
     emp_policy = EmpMeanPolicy(envs[0], online=False, batch_size=num_envs)
-    lnr_policy = BanditTransformerController(model, sample=False, batch_size=num_envs)
+    adp_policy = AdaptiveDopaminePolicy(envs[0], online=False, batch_size=num_envs)
     thomp_policy = ThompsonSamplingPolicy(
         envs[0],
         std=var,
@@ -276,18 +278,18 @@ def offline(eval_trajs, model, n_eval, horizon, var, bandit_type):
     emp_policy.set_batch_numpy_vec(batch)
     thomp_policy.set_batch_numpy_vec(batch)
     lcb_policy.set_batch_numpy_vec(batch)
-    lnr_policy.set_batch_numpy_vec(batch)
+    adp_policy.set_batch_numpy_vec(batch)
     
     _, _, _, rs_opt = vec_env.deploy_eval(opt_policy)
     _, _, _, rs_emp = vec_env.deploy_eval(emp_policy)
-    _, _, _, rs_lnr = vec_env.deploy_eval(lnr_policy)
+    _, _, _, rs_adp = vec_env.deploy_eval(adp_policy)
     _, _, _, rs_lcb = vec_env.deploy_eval(lcb_policy)
     _, _, _, rs_thmp = vec_env.deploy_eval(thomp_policy)
 
 
     baselines = {
         'opt': np.array(rs_opt),
-        'lnr': np.array(rs_lnr),
+        'adp': np.array(rs_adp),
         'emp': np.array(rs_emp),
         'thmp': np.array(rs_thmp),
         'lcb': np.array(rs_lcb),

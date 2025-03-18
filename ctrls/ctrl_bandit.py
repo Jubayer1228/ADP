@@ -117,7 +117,307 @@ class EmpMeanPolicy(Controller):
         self.a = a
         return self.a
 
+class AdaptiveDopaminePolicy(Controller):
+    """
+    Beta is scaled by the range of empirical means:
+    bonus = (beta0 * range_of_means) * uncertainty.
+    
+    Key Fix:
+    1. Maintain self.b and self.counts as persistent state across steps.
+    2. Update them using the last step's information from each environment.
+    3. Do NOT reinitialize these between episodes if you want cumulative learning.
+    """
+    def __init__(self, env, beta0=0.8, online=False, batch_size=1):
+        super().__init__()
+        self.env = env
+        self.beta0 = beta0
+        self.online = online
+        self.batch_size = batch_size
+        self.reset()
 
+    def reset(self):
+        """Reset the policy's internal statistics. Call this only once at initialization,
+        not between episodes if you want cumulative learning."""
+        if self.batch_size > 1:
+            self.b = np.zeros((self.batch_size, self.env.dim))       # cumulative rewards per env per arm
+            self.counts = np.zeros((self.batch_size, self.env.dim))    # counts per env per arm
+        else:
+            self.b = np.zeros(self.env.dim)       # shape: (env.dim,)
+            self.counts = np.zeros(self.env.dim)  # shape: (env.dim,)
+        self.a = None
+
+    def act(self, x):
+        # Single-environment version (for debugging)
+        actions = self.batch['context_actions'].cpu().detach().numpy()
+        rewards = self.batch['context_rewards'].cpu().detach().numpy().flatten()
+        if actions.ndim == 3:
+            actions = actions[0]
+        last_action = actions[-1]
+        last_reward = rewards[-1]
+        c = np.argmax(last_action)
+        self.b[c] += last_reward
+        self.counts[c] += 1
+
+        #print("[DEBUG act] last_action:", last_action)
+        #print("[DEBUG act] last_reward:", last_reward)
+        #print("[DEBUG act] updated b:", self.b)
+        #print("[DEBUG act] updated counts:", self.counts)
+
+        b_mean = self.b / np.maximum(1, self.counts)
+        uncertainty = 1.0 / np.sqrt(self.counts + 1.0)
+        range_means = b_mean.max() - b_mean.min() if self.env.dim > 1 else 0.0
+        beta_adaptive = self.beta0 * range_means
+        dopamine_bonus = beta_adaptive * uncertainty
+        scores = b_mean + dopamine_bonus
+
+        i = np.argmax(scores)
+        j = np.argmin(self.counts)
+        if self.online and self.counts[j] == 0:
+            i = j
+
+        a = np.zeros(self.env.dim)
+        a[i] = 1.0
+        self.a = a
+        return self.a
+
+    def act_numpy_vec(self, x):
+        """
+        Vectorized version for batch environments.
+        Expects self.batch to have:
+          - 'context_actions': shape (B, seq_len, env.dim)
+          - 'context_rewards': shape (B, seq_len) or (B, seq_len, 1)
+        Updates persistent state (self.b, self.counts) using only the last step from each environment.
+        """
+        # Get actions and rewards as NumPy arrays
+        if isinstance(self.batch['context_actions'], np.ndarray):
+            actions = self.batch['context_actions']
+        else:
+            actions = self.batch['context_actions'].cpu().detach().numpy()
+            
+        if isinstance(self.batch['context_rewards'], np.ndarray):
+            rewards = self.batch['context_rewards']
+        else:
+            rewards = self.batch['context_rewards'].cpu().detach().numpy()
+
+        # Squeeze extra dimension if necessary.
+        if rewards.ndim == 3:
+            rewards = rewards[:, :, 0]
+
+        if actions.ndim != 3:
+            raise ValueError("Expected context_actions shape (B, seq_len, env.dim)")
+
+        B, seq_len, D = actions.shape
+        #print("[DEBUG] Batch actions shape:", actions.shape)
+        #print("[DEBUG] Batch rewards shape:", rewards.shape)
+
+        # If no history exists, use persistent state directly.
+        if seq_len == 0:
+            #print("[DEBUG] No history available; using persistent state.")
+            if self.batch_size > 1:
+                chosen_indices = np.argmin(self.counts, axis=-1)
+            else:
+                chosen_indices = np.argmin(self.counts)
+            actions_out = np.zeros((B, D))
+            if self.batch_size > 1:
+                actions_out[np.arange(B), chosen_indices] = 1.0
+            else:
+                actions_out[chosen_indices] = 1.0
+            self.a = actions_out
+            #print("[DEBUG] Chosen indices (no history):", chosen_indices)
+            return self.a
+
+        # Update persistent state using the last step from each environment.
+        for idx in range(B):
+            last_action = actions[idx, -1, :]   # shape: (env.dim,)
+            last_reward = rewards[idx, -1]        # scalar
+            c = np.argmax(last_action)
+            self.b[idx, c] += last_reward
+            self.counts[idx, c] += 1
+            #print(f"[DEBUG] Env {idx}: last_action={last_action}, last_reward={last_reward}, chosen arm={c}")
+
+        #print("[DEBUG] Updated persistent b:", self.b)
+        #print("[DEBUG] Updated persistent counts:", self.counts)
+
+        # Convert counts to float to ensure proper division.
+        counts_float = self.counts.astype(np.float32)
+        b_mean = self.b / np.maximum(1.0, counts_float)
+        uncertainty = 1.0 / np.sqrt(counts_float + 1.0)
+        #print("[DEBUG] b_mean:", b_mean)
+        #print("[DEBUG] uncertainty:", uncertainty)
+
+        # Compute the range among empirical means for each environment.
+        range_means = np.max(b_mean, axis=-1) - np.min(b_mean, axis=-1)  # shape: (B,)
+        beta_adaptive = self.beta0 * range_means[:, None]  # shape: (B, 1)
+        #print("[DEBUG] range_means:", range_means)
+        #print("[DEBUG] beta_adaptive:", beta_adaptive)
+
+        dopamine_bonus = beta_adaptive * uncertainty  # shape: (B, env.dim)
+        scores = b_mean + dopamine_bonus
+        #print("[DEBUG] dopamine_bonus:", dopamine_bonus)
+        #print("[DEBUG] scores:", scores)
+
+        # Choose best arm for each environment.
+        chosen_indices = np.argmax(scores, axis=-1)
+        j = np.argmin(counts_float, axis=-1)
+        untried = (counts_float[np.arange(B), j] == 0)
+        chosen_indices[untried] = j[untried]
+        #print("[DEBUG] chosen_indices:", chosen_indices)
+
+        actions_out = np.zeros((B, D))
+        actions_out[np.arange(B), chosen_indices] = 1.0
+        self.a = actions_out
+        #print("[DEBUG] Final actions:", self.a)
+        return self.a
+    
+class NonlinearDopaminePolicy(Controller):
+    """
+    Persistent version:
+      bonus = beta * (uncertainty)^gamma
+
+    This policy maintains internal b and counts across calls,
+    updating only the last step of the context. Over time,
+    it accumulates knowledge about each arm's reward.
+    """
+    def __init__(self, env, beta=0.9, gamma=1.0, online=False, batch_size=1):
+        super().__init__()
+        self.env = env
+        self.beta = beta
+        self.gamma = gamma
+        self.online = online
+        self.batch_size = batch_size
+        self.reset()
+
+    def reset(self):
+        """Initialize persistent stats for each environment."""
+        if self.batch_size > 1:
+            self.b = np.zeros((self.batch_size, self.env.dim))
+            self.counts = np.zeros((self.batch_size, self.env.dim))
+        else:
+            self.b = np.zeros(self.env.dim)
+            self.counts = np.zeros(self.env.dim)
+        self.a = None
+
+    def act(self, x):
+        """
+        Single-environment approach. Only update from the last step.
+        """
+        # Retrieve entire context, but we only need the last step to update stats incrementally.
+        actions = self.batch['context_actions'].cpu().detach().numpy()
+        rewards = self.batch['context_rewards'].cpu().detach().numpy().flatten()
+
+        if actions.ndim == 3:
+            actions = actions[0]  # shape: (seq_len, env.dim)
+
+        last_action = actions[-1]
+        last_reward = rewards[-1]
+        c = np.argmax(last_action)
+        self.b[c] += last_reward
+        self.counts[c] += 1
+
+        # Compute means and nonlinear bonus
+        b_mean = self.b / np.maximum(1, self.counts)
+        unc = 1.0 / np.sqrt(self.counts + 1.0)
+        dop_bonus = self.beta * (unc ** self.gamma)
+        scores = b_mean + dop_bonus
+
+        i = np.argmax(scores)
+        j = np.argmin(self.counts)
+        if self.online and self.counts[j] == 0:
+            i = j
+
+        a = np.zeros(self.env.dim)
+        a[i] = 1.0
+        self.a = a
+        return self.a
+
+    def act_numpy_vec(self, x):
+        """
+        Expects self.batch to have:
+          - 'context_actions': shape (B, seq_len, env.dim)
+          - 'context_rewards': shape (B, seq_len) or (B, seq_len, 1)
+        Updates persistent state (self.b and self.counts) using only the last step from each environment.
+        """
+        # Convert inputs to numpy arrays if necessary.
+        if isinstance(self.batch['context_actions'], np.ndarray):
+            actions = self.batch['context_actions']
+        else:
+            actions = self.batch['context_actions'].cpu().detach().numpy()
+            
+        if isinstance(self.batch['context_rewards'], np.ndarray):
+            rewards = self.batch['context_rewards']
+        else:
+            rewards = self.batch['context_rewards'].cpu().detach().numpy()
+
+        # Remove extra dimension if necessary.
+        if rewards.ndim == 3:
+            rewards = rewards[:, :, 0]
+
+        if actions.ndim != 3:
+            raise ValueError("Expected context_actions shape (B, seq_len, env.dim)")
+
+        B, seq_len, D = actions.shape
+        print("[DEBUG] Batch actions shape:", actions.shape)
+        print("[DEBUG] Batch rewards shape:", rewards.shape)
+
+        # If no history exists, use persistent state directly.
+        if seq_len == 0:
+            print("[DEBUG] No history available; using persistent state.")
+            if self.batch_size > 1:
+                chosen_indices = np.argmin(self.counts, axis=-1)
+            else:
+                chosen_indices = np.argmin(self.counts)
+            actions_out = np.zeros((B, D))
+            if self.batch_size > 1:
+                actions_out[np.arange(B), chosen_indices] = 1.0
+            else:
+                actions_out[chosen_indices] = 1.0
+            self.a = actions_out
+            print("[DEBUG] Chosen indices (no history):", chosen_indices)
+            return self.a
+
+        # Otherwise, update persistent state using the last step in each environment.
+        for idx in range(B):
+            # Ensure that the current environment has at least one step.
+            if seq_len > 0:
+                last_action = actions[idx, -1, :]   # shape: (env.dim,)
+                last_reward = rewards[idx, -1]        # scalar
+                c = np.argmax(last_action)
+                self.b[idx, c] += last_reward
+                self.counts[idx, c] += 1
+                print(f"[DEBUG] Env {idx}: last_action={last_action}, last_reward={last_reward}, chosen arm={c}")
+            else:
+                print(f"[DEBUG] Env {idx}: No history, skipping update.")
+
+        print("[DEBUG] Updated persistent b:", self.b)
+        print("[DEBUG] Updated persistent counts:", self.counts)
+
+        counts_float = self.counts.astype(np.float32)
+        b_mean = self.b / np.maximum(1.0, counts_float)
+        uncertainty = 1.0 / np.sqrt(counts_float + 1.0)
+        print("[DEBUG] b_mean:", b_mean)
+        print("[DEBUG] uncertainty:", uncertainty)
+
+        range_means = np.max(b_mean, axis=-1) - np.min(b_mean, axis=-1)
+        beta_adaptive = self.beta * range_means[:, None]
+        print("[DEBUG] range_means:", range_means)
+        print("[DEBUG] beta_adaptive:", beta_adaptive)
+
+        dopamine_bonus = beta_adaptive * (uncertainty ** self.gamma)
+        scores = b_mean + dopamine_bonus
+        print("[DEBUG] dopamine_bonus:", dopamine_bonus)
+        print("[DEBUG] scores:", scores)
+
+        chosen_indices = np.argmax(scores, axis=-1)
+        j = np.argmin(counts_float, axis=-1)
+        untried = (counts_float[np.arange(B), j] == 0)
+        chosen_indices[untried] = j[untried]
+        print("[DEBUG] chosen_indices:", chosen_indices)
+
+        actions_out = np.zeros((B, D))
+        actions_out[np.arange(B), chosen_indices] = 1.0
+        self.a = actions_out
+        print("[DEBUG] Final actions:", self.a)
+        return self.a
 
 class ThompsonSamplingPolicy(Controller):
     def __init__(self, env, std=.1, sample=False, prior_mean=.5, prior_var=1/12.0, warm_start=False, batch_size=1):
@@ -526,6 +826,3 @@ class LinUCBPolicy(OptPolicy):
             hot_vectors.append(hot_vector)
 
         return np.array(hot_vectors)
-
-
-

@@ -21,10 +21,6 @@ from utils import (
     build_bandit_model_filename,
     build_linear_bandit_data_filename,
     build_linear_bandit_model_filename,
-    build_darkroom_data_filename,
-    build_darkroom_model_filename,
-    build_miniworld_data_filename,
-    build_miniworld_model_filename,
     worker_init_fn,
 )
 
@@ -103,6 +99,7 @@ if __name__ == '__main__':
         'horizon': horizon,
         'dim': dim,
         'seed': seed,
+        'epoch': num_epochs
     }
     if env == 'bandit':
         state_dim = 1
@@ -114,6 +111,7 @@ if __name__ == '__main__':
             env, n_envs, dataset_config, mode=1)
 
         model_config.update({'var': var, 'cov': cov})
+        print(model_config['epoch'])
         filename = build_bandit_model_filename(env, model_config)
 
     elif env == 'bandit_thompson':
@@ -139,43 +137,6 @@ if __name__ == '__main__':
 
         model_config.update({'lin_d': lin_d, 'var': var, 'cov': cov})
         filename = build_linear_bandit_model_filename(env, model_config)
-
-    elif env.startswith('darkroom'):
-        state_dim = 2
-        action_dim = 5
-
-        dataset_config.update({'rollin_type': 'uniform'})
-        path_train = build_darkroom_data_filename(
-            env, n_envs, dataset_config, mode=0)
-        path_test = build_darkroom_data_filename(
-            env, n_envs, dataset_config, mode=1)
-
-        filename = build_darkroom_model_filename(env, model_config)
-
-    elif env == 'miniworld':
-        state_dim = 2   # direction vector is 2D, no position included
-        action_dim = 4
-
-        dataset_config.update({'rollin_type': 'uniform'})
-
-        increment = 5000
-        starts = np.arange(0, n_envs, increment)
-        starts = np.array(starts)
-        ends = starts + increment - 1
-
-        paths_train = []
-        paths_test = []
-        for start_env_id, end_env_id in zip(starts, ends):
-            path_train = build_miniworld_data_filename(
-                env, start_env_id, end_env_id, dataset_config, mode=0)
-            path_test = build_miniworld_data_filename(
-                env, start_env_id, end_env_id, dataset_config, mode=1)
-
-            paths_train.append(path_train)
-            paths_test.append(path_test)
-
-        filename = build_miniworld_model_filename(env, model_config)
-        print(f"Generate filename: {filename}")
 
     else:
         raise NotImplementedError
@@ -220,37 +181,16 @@ if __name__ == '__main__':
 
 
 
-    if env == 'miniworld':
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
-        ])
-
-
-
-        params.update({'num_workers': 16,
-                'prefetch_factor': 2,
-                'persistent_workers': True,
-                'pin_memory': True,
-                'batch_size': 64,
-                'worker_init_fn': worker_init_fn,
-            })
-
-
-        printw("Loading miniworld data...")
-        train_dataset = ImageDataset(paths_train, config, transform)
-        test_dataset = ImageDataset(paths_test, config, transform)
-        printw("Done loading miniworld data")
-    else:
-        train_dataset = Dataset(path_train, config)
-        test_dataset = Dataset(path_test, config)
+    
+    train_dataset = Dataset(path_train, config)
+    test_dataset = Dataset(path_test, config)
 
     train_loader = torch.utils.data.DataLoader(train_dataset, **params)
     test_loader = torch.utils.data.DataLoader(test_dataset, **params)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
+    #loss_fn = torch.nn.MSELoss(reduction='sum')
 
     test_loss = []
     train_loss = []
